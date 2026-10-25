@@ -7,6 +7,9 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -16,10 +19,21 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Locale;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.concurrent.ConcurrentHashMap;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
 
 /** Small REST API that lets the React frontend use the existing Java/SQLite service. */
 public class ApiServer {
     private static final Gson GSON = new Gson();
+    private static final SecureRandom TOKEN_RANDOM = new SecureRandom();
+    private static final ConcurrentHashMap<String, AuthSession> SESSIONS = new ConcurrentHashMap<>();
+    private static final long SESSION_LIFETIME_MILLIS = 8L * 60L * 60L * 1000L;
+    private static final int MIN_PBKDF2_ITERATIONS = 100_000;
+    private static final int MAX_PBKDF2_ITERATIONS = 1_000_000;
 
     public static void main(String[] args) throws Exception {
         try (Connection conn = DBConnection.getConnection()) {
@@ -44,9 +58,47 @@ public class ApiServer {
             ex.close();
             return;
         }
+
+        String method = ex.getRequestMethod().toUpperCase(Locale.ROOT);
+        String path = ex.getRequestURI().getPath().substring("/api".length());
+
+        // Health check stays public so hosting providers can verify that the service is up.
+        if ("GET".equals(method) && "/health".equals(path)) {
+            send(ex, 200, Map.of("status", "ok"));
+            return;
+        }
+        // Login is the only public API operation that grants an authenticated session.
+        if ("POST".equals(method) && "/auth/login".equals(path)) {
+            handleLogin(ex);
+            return;
+        }
+
+        String bearer = bearerToken(ex);
+        AuthSession session = findSession(bearer);
+        if ("GET".equals(method) && "/auth/me".equals(path)) {
+            if (session == null) {
+                send(ex, 401, Map.of("error", "Please sign in to continue."));
+            } else {
+                send(ex, 200, Map.of("username", session.username));
+            }
+            return;
+        }
+        if ("POST".equals(method) && "/auth/logout".equals(path)) {
+            if (session == null) {
+                send(ex, 401, Map.of("error", "Your session has expired. Please sign in again."));
+            } else {
+                SESSIONS.remove(bearer);
+                send(ex, 200, Map.of("message", "Signed out successfully."));
+            }
+            return;
+        }
+        // Every library-management route is private, including all reads and all writes.
+        if (session == null) {
+            send(ex, 401, Map.of("error", "Please sign in to access the library administration API."));
+            return;
+        }
+
         try (Connection conn = DBConnection.getConnection()) {
-            String method = ex.getRequestMethod().toUpperCase();
-            String path = ex.getRequestURI().getPath().substring("/api".length());
             LibraryService lib = new LibraryService(conn);
             Object result;
             int status = 200;
@@ -166,8 +218,6 @@ public class ApiServer {
                 int issueId = Integer.parseInt(parts[2]);
                 double fine = lib.returnBook(issueId);
                 result = Map.of("message", fine > 0 ? "Book returned with a fine." : "Book returned on time.", "fine", fine);
-            } else if ("GET".equals(method) && "/health".equals(path)) {
-                result = Map.of("status", "ok");
             } else {
                 result = Map.of("error", "Endpoint not found.");
                 status = 404;
@@ -179,12 +229,131 @@ public class ApiServer {
             send(ex, 400, Map.of("error", safeMessage(e)));
         } catch (SQLException e) {
             String msg = safeMessage(e);
-            if (msg.toLowerCase().contains("unique constraint")) msg = "That email is already registered.";
+            if (msg.toLowerCase(Locale.ROOT).contains("unique constraint")) msg = "That email is already registered.";
             send(ex, 400, Map.of("error", msg));
         } catch (Exception e) {
             e.printStackTrace();
             send(ex, 500, Map.of("error", "Server error: " + safeMessage(e)));
         }
+    }
+
+    private static void handleLogin(HttpExchange ex) throws IOException {
+        try {
+            JsonObject request = body(ex);
+            String username = requiredString(request, "username").toLowerCase(Locale.ROOT);
+            if (!request.has("password") || request.get("password").isJsonNull()) {
+                throw new IllegalArgumentException("Password is required.");
+            }
+            String password = request.get("password").getAsString();
+            if (password.isEmpty()) throw new IllegalArgumentException("Password is required.");
+
+            Map<String, AuthUser> users;
+            try {
+                users = loadConfiguredUsers();
+            } catch (RuntimeException configError) {
+                send(ex, 503, Map.of("error", "Login is not configured correctly. Check SHELFWISE_USERS_JSON in the Render backend environment."));
+                return;
+            }
+            if (users.isEmpty()) {
+                send(ex, 503, Map.of("error", "Login is not configured yet. Add SHELFWISE_USERS_JSON to the Render backend environment."));
+                return;
+            }
+            AuthUser user = users.get(username);
+            if (user == null || !passwordMatches(password, user)) {
+                send(ex, 401, Map.of("error", "Invalid user ID or password."));
+                return;
+            }
+
+            byte[] tokenBytes = new byte[32];
+            TOKEN_RANDOM.nextBytes(tokenBytes);
+            String token = Base64.getUrlEncoder().withoutPadding().encodeToString(tokenBytes);
+            SESSIONS.put(token, new AuthSession(user.username, System.currentTimeMillis() + SESSION_LIFETIME_MILLIS));
+            send(ex, 200, Map.of(
+                    "token", token,
+                    "username", user.username,
+                    "expiresInSeconds", SESSION_LIFETIME_MILLIS / 1000L));
+        } catch (IllegalArgumentException e) {
+            send(ex, 400, Map.of("error", safeMessage(e)));
+        }
+    }
+
+    private static Map<String, AuthUser> loadConfiguredUsers() {
+        String raw = System.getenv("SHELFWISE_USERS_JSON");
+        if (raw == null || raw.isBlank()) return Collections.emptyMap();
+        var root = JsonParser.parseString(raw);
+        if (!root.isJsonArray()) throw new IllegalStateException("SHELFWISE_USERS_JSON must be a JSON array.");
+        Map<String, AuthUser> users = new LinkedHashMap<>();
+        for (var entry : root.getAsJsonArray()) {
+            if (!entry.isJsonObject()) throw new IllegalStateException("Each configured user must be a JSON object.");
+            JsonObject item = entry.getAsJsonObject();
+            String username = requiredConfigString(item, "username").toLowerCase(Locale.ROOT);
+            String salt = requiredConfigString(item, "salt");
+            String hash = requiredConfigString(item, "hash");
+            int iterations = item.has("iterations") ? item.get("iterations").getAsInt() : 210_000;
+            if (iterations < MIN_PBKDF2_ITERATIONS || iterations > MAX_PBKDF2_ITERATIONS) {
+                throw new IllegalStateException("Password hash iteration count is outside the supported range.");
+            }
+            Base64.getDecoder().decode(salt);
+            Base64.getDecoder().decode(hash);
+            AuthUser user = new AuthUser(username, salt, hash, iterations);
+            if (users.putIfAbsent(username, user) != null) throw new IllegalStateException("User IDs must be unique.");
+        }
+        if (users.size() < 1 || users.size() > 20) throw new IllegalStateException("Configure between 1 and 20 users.");
+        return users;
+    }
+
+    private static String requiredConfigString(JsonObject item, String key) {
+        if (!item.has(key) || item.get(key).isJsonNull() || item.get(key).getAsString().isBlank()) {
+            throw new IllegalStateException("Missing configuration field: " + key);
+        }
+        return item.get(key).getAsString().trim();
+    }
+
+    private static boolean passwordMatches(String password, AuthUser user) {
+        PBEKeySpec spec = new PBEKeySpec(password.toCharArray(), Base64.getDecoder().decode(user.salt), user.iterations, 256);
+        try {
+            byte[] actual = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded();
+            byte[] expected = Base64.getDecoder().decode(user.hash);
+            return MessageDigest.isEqual(actual, expected);
+        } catch (GeneralSecurityException | IllegalArgumentException e) {
+            return false;
+        } finally {
+            spec.clearPassword();
+        }
+    }
+
+    private static String bearerToken(HttpExchange ex) {
+        String header = ex.getRequestHeaders().getFirst("Authorization");
+        if (header == null || !header.regionMatches(true, 0, "Bearer ", 0, 7)) return null;
+        String token = header.substring(7).trim();
+        return token.isEmpty() ? null : token;
+    }
+
+    private static AuthSession findSession(String token) {
+        if (token == null) return null;
+        AuthSession session = SESSIONS.get(token);
+        if (session == null) return null;
+        if (session.expiresAt <= System.currentTimeMillis()) {
+            SESSIONS.remove(token, session);
+            return null;
+        }
+        return session;
+    }
+
+    private static final class AuthUser {
+        final String username;
+        final String salt;
+        final String hash;
+        final int iterations;
+        AuthUser(String username, String salt, String hash, int iterations) {
+            this.username = username; this.salt = salt; this.hash = hash; this.iterations = iterations;
+        }
+    }
+
+    private static final class AuthSession {
+        final String username;
+        final long expiresAt;
+        AuthSession(String username, long expiresAt) { this.username = username; this.expiresAt = expiresAt; }
     }
 
     private static Map<String, Object> dashboard(Connection c) throws SQLException {
@@ -292,9 +461,22 @@ public class ApiServer {
     }
 
     private static void addCors(HttpExchange ex) {
-        ex.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+        String origin = ex.getRequestHeaders().getFirst("Origin");
+        String configured = System.getenv().getOrDefault(
+                "SHELFWISE_ALLOWED_ORIGINS",
+                "https://shelfwise-library-management.onrender.com,http://localhost:5173");
+        if (origin != null) {
+            for (String allowed : configured.split(",")) {
+                if (origin.equals(allowed.trim())) {
+                    ex.getResponseHeaders().set("Access-Control-Allow-Origin", origin);
+                    ex.getResponseHeaders().set("Vary", "Origin");
+                    break;
+                }
+            }
+        }
         ex.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-        ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
+        ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        ex.getResponseHeaders().set("Access-Control-Max-Age", "600");
     }
 
     private static void send(HttpExchange ex, int status, Object value) throws IOException {
