@@ -4,7 +4,7 @@ import {
   BookPlus, CalendarDays, ChartNoAxesCombined, Check, ChevronDown, CircleCheck, CircleHelp, Clock3, GraduationCap,
   Layers3, LayoutDashboard, LibraryBig, LoaderCircle, Mail, Menu, Plus, Search, Settings2,
   SlidersHorizontal, Sparkles, Users, UserRoundPlus, X, RotateCcw,
-  Bookmark, Pencil, Trash2, Sun, Moon, House, LockKeyhole, LogOut
+  Bookmark, Pencil, Trash2, Sun, Moon, House
 } from 'lucide-react';
 
 const API =
@@ -12,21 +12,13 @@ const API =
   'http://localhost:8080/api';
 
 async function api(path, options = {}) {
-  const token = sessionStorage.getItem('shelfwise-token');
-  const headers = {
-    'Content-Type': 'application/json',
-    ...(options.headers || {}),
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
-  const response = await fetch(`${API}${path}`, { ...options, headers });
+  const response = await fetch(`${API}${path}`, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+  });
   const raw = await response.text();
   let data = {};
   try { data = raw ? JSON.parse(raw) : {}; } catch { data = { error: raw || 'Unexpected server response.' }; }
-  if (response.status === 401 && token) {
-    sessionStorage.removeItem('shelfwise-token');
-    sessionStorage.removeItem('shelfwise-user');
-    window.dispatchEvent(new Event('shelfwise-auth-expired'));
-  }
   if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
   return data;
 }
@@ -58,53 +50,11 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem('shelfwise-theme') || 'dark');
-  const [authChecked, setAuthChecked] = useState(() => !sessionStorage.getItem('shelfwise-token'));
-  const [isAuthenticated, setIsAuthenticated] = useState(() => Boolean(sessionStorage.getItem('shelfwise-token')));
-  const [authUser, setAuthUser] = useState(() => sessionStorage.getItem('shelfwise-user') || '');
-  const [authBusy, setAuthBusy] = useState(false);
-  const [authError, setAuthError] = useState('');
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('shelfwise-theme', theme);
   }, [theme]);
-
-  // Validate a previously signed-in session with the Java backend.
-  useEffect(() => {
-    const token = sessionStorage.getItem('shelfwise-token');
-    if (!token) {
-      setAuthChecked(true);
-      setLoading(false);
-      return;
-    }
-    let cancelled = false;
-    api('/auth/me')
-      .then(data => {
-        if (cancelled) return;
-        setAuthUser(data.username || sessionStorage.getItem('shelfwise-user') || '');
-        setIsAuthenticated(true);
-      })
-      .catch(() => {
-        sessionStorage.removeItem('shelfwise-token');
-        sessionStorage.removeItem('shelfwise-user');
-        if (cancelled) return;
-        setAuthUser('');
-        setIsAuthenticated(false);
-      })
-      .finally(() => { if (!cancelled) setAuthChecked(true); });
-    return () => { cancelled = true; };
-  }, []);
-
-  useEffect(() => {
-    const onExpired = () => {
-      setIsAuthenticated(false);
-      setAuthUser('');
-      setAuthError('Your session has expired. Please sign in again.');
-      setLoading(false);
-    };
-    window.addEventListener('shelfwise-auth-expired', onExpired);
-    return () => window.removeEventListener('shelfwise-auth-expired', onExpired);
-  }, []);
 
   const refreshData = useCallback(async () => {
     try {
@@ -117,15 +67,7 @@ export default function App() {
     } finally { setLoading(false); }
   }, []);
 
-  useEffect(() => {
-    if (!authChecked) return;
-    if (isAuthenticated) {
-      setLoading(true);
-      refreshData();
-    } else {
-      setLoading(false);
-    }
-  }, [authChecked, isAuthenticated, refreshData]);
+  useEffect(() => { refreshData(); }, [refreshData]);
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(null), 3600);
@@ -213,50 +155,6 @@ export default function App() {
     } catch (e) { setNotice({ kind: 'error', text: e.message }); }
   }
 
-  async function handleLogin(username, password) {
-    setAuthBusy(true);
-    setAuthError('');
-    try {
-      const data = await api('/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ username, password }),
-      });
-      sessionStorage.setItem('shelfwise-token', data.token);
-      sessionStorage.setItem('shelfwise-user', data.username);
-      setAuthUser(data.username);
-      setIsAuthenticated(true);
-      setShowWelcome(false);
-      setPage('Dashboard');
-      setSearch('');
-      setLoading(true);
-    } catch (e) {
-      setAuthError(e.message || 'Unable to sign in. Check your user ID and password.');
-    } finally {
-      setAuthBusy(false);
-    }
-  }
-
-  async function handleLogout() {
-    try {
-      if (sessionStorage.getItem('shelfwise-token')) {
-        await api('/auth/logout', { method: 'POST', body: '{}' });
-      }
-    } catch (_) {
-      // Clear the local session even if the backend is temporarily unreachable.
-    } finally {
-      sessionStorage.removeItem('shelfwise-token');
-      sessionStorage.removeItem('shelfwise-user');
-      setIsAuthenticated(false);
-      setAuthUser('');
-      setAuthError('');
-      setShowWelcome(true);
-      setPage('Dashboard');
-      setBooks([]); setMembers([]); setIssues([]);
-      setDashboard({ totalTitles: 0, totalCopies: 0, members: 0, activeIssues: 0, overdue: 0, popularBooks: [] });
-      setLoading(false);
-    }
-  }
-
   const title = page === 'Dashboard' ? 'Dashboard' : page;
   const toggleTheme = () => setTheme(current => current === 'light' ? 'dark' : 'light');
   const subtitle = {
@@ -266,23 +164,13 @@ export default function App() {
     Circulation: 'Track active loans, due dates, and book returns.',
   }[page];
 
-  if (!authChecked) {
-    return <main className={`welcome-screen ${theme === 'dark' ? 'welcome-dark' : 'welcome-light'}`} data-theme={theme} style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24, boxSizing: 'border-box' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}><LoaderCircle className="spin" size={22} /> Checking your Shelfwise session…</div>
-    </main>;
-  }
-
   if (showWelcome) {
     return <WelcomeHome
       theme={theme}
       onToggleTheme={toggleTheme}
-      onEnter={() => { setPage('Dashboard'); setShowWelcome(false); setSearch(''); setAuthError(''); }}
+      onEnter={() => { setPage('Dashboard'); setShowWelcome(false); setSearch(''); }}
       onExplore={() => document.getElementById('welcome-features')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
     />;
-  }
-
-  if (!isAuthenticated) {
-    return <LoginScreen theme={theme} onToggleTheme={toggleTheme} onBack={() => { setShowWelcome(true); setAuthError(''); }} onLogin={handleLogin} busy={authBusy} error={authError} />;
   }
 
   return (
@@ -314,7 +202,7 @@ export default function App() {
           <div className="help-icon"><Sparkles size={17} /></div><div><b>Little things add up.</b><p>A well-organised library starts with one good system.</p></div>
         </div>
         <div className="profile-row">
-          <div className="profile-avatar">{(authUser || 'Admin').slice(0, 2).toUpperCase()}</div><div className="profile-info"><b>{authUser || 'Library Admin'}</b><small>Authenticated team member</small></div><button className="icon-button" onClick={handleLogout} title="Sign out" aria-label="Sign out"><LogOut size={17} /></button>
+          <div className="profile-avatar">GN</div><div className="profile-info"><b>Library Admin</b><small>Campus account</small></div><button className="icon-button" title="Settings"><Settings2 size={17} /></button>
         </div>
       </aside>
       {mobileNav && <button className="nav-backdrop" onClick={() => setMobileNav(false)} aria-label="Close navigation" />}
@@ -354,49 +242,6 @@ export default function App() {
       {dialog && <Dialog type={dialog} books={books} members={members} selectedBook={selectedBook} record={editingRecord} saving={saving} onClose={() => setDialog(null)} onSubmit={handleSubmit} />}
     </div>
   );
-}
-
-function LoginScreen({ theme, onToggleTheme, onBack, onLogin, busy, error }) {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const dark = theme === 'dark';
-  const card = {
-    width: 'min(100%, 430px)', boxSizing: 'border-box', padding: 'clamp(24px, 5vw, 38px)',
-    borderRadius: 24, border: `1px solid ${dark ? 'rgba(148,163,184,.24)' : 'rgba(100,116,139,.22)'}`,
-    background: dark ? 'rgba(15, 28, 51, .88)' : 'rgba(255,255,255,.92)',
-    boxShadow: dark ? '0 24px 70px rgba(0,0,0,.28)' : '0 24px 70px rgba(30,64,175,.12)',
-    color: dark ? '#eef4ff' : '#172b49',
-  };
-  const field = {
-    width: '100%', boxSizing: 'border-box', marginTop: 8, padding: '13px 14px', borderRadius: 12,
-    border: `1px solid ${dark ? 'rgba(148,163,184,.30)' : '#cbd5e1'}`,
-    background: dark ? '#0b172b' : '#ffffff', color: dark ? '#eef4ff' : '#172b49', fontSize: 15,
-    outlineOffset: 2,
-  };
-  return <main className={`welcome-screen ${dark ? 'welcome-dark' : 'welcome-light'}`} data-theme={theme} style={{ minHeight: '100vh', boxSizing: 'border-box', padding: '0 5vw 32px' }}>
-    <header className="welcome-header">
-      <div className="welcome-brand"><div className="welcome-brand-mark"><LibraryBig size={25} strokeWidth={2.1} /></div><div><b>Shelfwise</b><span>LIBRARY SPACE</span></div></div>
-      <div className="welcome-header-actions">
-        <button className="theme-toggle welcome-theme-toggle" onClick={onToggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`}><span className="theme-toggle-icon">{dark ? <Sun size={16} /> : <Moon size={16} />}</span><span className="theme-toggle-label">{dark ? 'Light mode' : 'Dark mode'}</span><span className={`theme-switch ${dark ? 'is-dark' : ''}`}><i /></span></button>
-      </div>
-    </header>
-    <section style={{ display: 'grid', placeItems: 'center', padding: 'clamp(36px, 7vh, 72px) 0 24px' }}>
-      <div style={card}>
-        <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 48, height: 48, borderRadius: 15, background: 'linear-gradient(135deg,#4f65f5,#14b8c8)', color: '#fff', marginBottom: 20 }}><LockKeyhole size={23} /></div>
-        <div style={{ color: dark ? '#67d3ef' : '#3268e8', fontSize: 11, fontWeight: 800, letterSpacing: 2, marginBottom: 10 }}>TEAM ACCESS</div>
-        <h1 style={{ margin: '0 0 10px', fontSize: 'clamp(28px, 4vw, 36px)', lineHeight: 1.15, letterSpacing: '-.7px' }}>Sign in to Shelfwise</h1>
-        <p style={{ margin: '0 0 26px', lineHeight: 1.65, color: dark ? '#aebed5' : '#607086', fontSize: 14 }}>Use the account provided to you by your Shelfwise team administrator. Public registration is disabled.</p>
-        {error && <div role="alert" style={{ marginBottom: 18, padding: '12px 14px', borderRadius: 10, color: dark ? '#fecaca' : '#991b1b', background: dark ? 'rgba(127,29,29,.35)' : '#fee2e2', border: '1px solid #ef444455', fontSize: 13 }}>{error}</div>}
-        <form onSubmit={e => { e.preventDefault(); onLogin(username.trim(), password); }}>
-          <label style={{ display: 'block', marginBottom: 18, fontSize: 13, fontWeight: 700 }}>User ID<input autoComplete="username" name="username" value={username} onChange={e => setUsername(e.target.value)} placeholder="Enter your user ID" required maxLength={60} style={field} /></label>
-          <label style={{ display: 'block', marginBottom: 22, fontSize: 13, fontWeight: 700 }}>Password<input autoComplete="current-password" name="password" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Enter your password" required maxLength={200} style={field} /></label>
-          <button type="submit" className="welcome-enter-button" disabled={busy} style={{ width: '100%', justifyContent: 'center', opacity: busy ? .75 : 1 }}>{busy && <LoaderCircle size={17} className="spin" />}{busy ? 'Signing in…' : 'Sign in to dashboard'} <ArrowRight size={18} /></button>
-        </form>
-        <div style={{ marginTop: 22, paddingTop: 18, borderTop: `1px solid ${dark ? 'rgba(148,163,184,.18)' : '#e2e8f0'}`, color: dark ? '#8ea1bd' : '#64748b', fontSize: 12, lineHeight: 1.6 }}>Only the four configured team accounts can sign in. Contact the administrator if you need access.</div>
-        <button className="welcome-explore-button" onClick={onBack} style={{ marginTop: 16 }}><ArrowRight size={16} style={{ transform: 'rotate(180deg)' }} /> Back to welcome page</button>
-      </div>
-    </section>
-  </main>;
 }
 
 function WelcomeHome({ theme, onToggleTheme, onEnter, onExplore }) {
