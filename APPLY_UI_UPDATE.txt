@@ -1,0 +1,11 @@
+SHELFWISE UI REFRESH — APPLY IN VS CODE
+
+This update changes only frontend/src/styles.css. It does not change React behavior, Java code, API routes, or the database.
+
+Steps:
+1. Make sure you have a backup of your current frontend/src/styles.css (optional but recommended).
+2. Extract this ZIP into your existing LibraryManagement project folder, allowing it to replace frontend/src/styles.css.
+3. If VS Code/Vite is already running, save the file or refresh the browser at http://localhost:5173.
+4. Keep the Java backend and Vite frontend terminals running.
+
+Theme: Midnight indigo sidebar, soft lavender workspace, crisp cards and tables, brighter action buttons, modern forms and responsive layout.

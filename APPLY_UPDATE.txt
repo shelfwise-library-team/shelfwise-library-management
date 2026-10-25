@@ -1,0 +1,38 @@
+SHELFWISE HOME + DASHBOARD REDESIGN
+===================================
+
+Design preview files are in design-previews/.
+They are visual concept mockups; they are not real screenshots of the running app.
+
+WHAT THIS UPDATE DOES
+- Opens a distinct welcome/home screen on every full browser page load.
+- Adds an Enter Dashboard button; this is the only primary way into the management workspace.
+- Adds a home-screen theme toggle and preserves the preference in localStorage.
+- Adds a Welcome home item inside the dashboard sidebar.
+- Refreshes both dashboard themes: high-contrast Arctic/Sapphire light and navy neon-glass dark.
+- Keeps the existing books, members, circulation, edit/delete dialogs, API routes, and fine-rate UI.
+- The supplied Java member classes use student fine Rs.20/day and faculty fine Rs.100/day.
+
+HOW TO APPLY
+1. Back up D:\Projects\LibraryManagement\frontend\src\App.jsx and styles.css.
+2. Merge the frontend folder from this package into your existing project folder.
+3. Merge the backend files listed in this package into matching paths in your project.
+   Do not delete other Java files such as Book.java, BookDAO.java, LibraryService.java,
+   Dao.java, or Main.java; they are not included because they are unchanged.
+4. Do not delete or overwrite backend\library.db. The updated DBConnection performs an
+   additive migration for the new member profile columns.
+5. Stop the old Java API terminal with Ctrl+C. In a new terminal run:
+   cd D:\Projects\LibraryManagement\backend
+   mvn clean compile exec:java
+6. Keep the Java terminal open. Keep/restart the frontend terminal in another terminal:
+   cd D:\Projects\LibraryManagement\frontend
+   npm.cmd run dev
+7. Open http://localhost:5173. A full refresh should always show the Welcome home page.
+   Click Enter Dashboard to enter the app. Use the theme toggle on either screen.
+
+NOTES
+- Keep your existing package.json and package-lock.json.
+- The Java API uses port 8080 and Vite normally uses port 5173.
+- If port 8080 is already occupied, stop the older Java server first.
+- Generated images are design references. The implemented frontend uses CSS-built visuals
+  and does not depend on these mockups being placed inside public/.

@@ -1,0 +1,29 @@
+SHELFWISE REPAIR PATCH — READ THIS FIRST
+
+This patch intentionally fixes the three discrepancies seen in the screenshots:
+1) The running UI was showing the old 3-field member form. The replacement App.jsx has Department, Year of Study (students), Register Number/Staff ID, Phone, and Designation (faculty) in both Add and Edit dialogs.
+2) Fine rates are ₹20/day for Student and ₹100/day for Faculty. The Java Student/Faculty classes and API return those rates; the Members table displays them explicitly as /day.
+3) Light mode uses a more distinct cool pearl/blue-lavender glass visual system. Dark mode styling is retained.
+
+IMPORTANT: The screenshots show an older App.jsx and older Java runtime still running. Replacing files alone will not update a Java process that is already running.
+
+INSTALL
+1. In VS Code, select the Java backend terminal and press Ctrl+C to stop it. Do not stop the node/Vite terminal.
+2. Back up D:\Projects\LibraryManagement\backend\library.db. Do not delete the DB.
+3. Extract this ZIP. It contains paths starting with frontend\ and backend\. Copy/merge those two folders into D:\Projects\LibraryManagement, accepting Replace for matching source files. DO NOT put the extracted frontend folder inside the existing frontend folder. The final file must be D:\Projects\LibraryManagement\frontend\src\App.jsx (not frontend\frontend\src\App.jsx).
+4. In VS Code, open D:\Projects\LibraryManagement\frontend\src\App.jsx and press Ctrl+F. Search for "Department". You must see the Department input. Search for "₹100/day" and confirm it appears in the member type option. If not, the file was copied into the wrong folder.
+5. Open backend\src\main\java\Student.java and confirm getFinePerDay() returns 20.0. Open Faculty.java and confirm getFinePerDay() returns 100.0.
+6. In the backend terminal, run:
+   cd D:\Projects\LibraryManagement\backend
+   mvn clean compile exec:java
+   Wait for "Library API running at http://localhost:8080/api".
+7. Check http://localhost:8080/api/health returns {"status":"ok"}.
+8. Check http://localhost:8080/api/members in the browser. The JSON records should have finePerDay 20 for students and 100 for faculty and include department/yearOfStudy/registerNumber/phone/designation fields.
+9. Refresh http://localhost:5173 with Ctrl+Shift+R. If a member dialog is already open, close it and open it again. If Vite had stopped, in a second terminal run:
+   cd D:\Projects\LibraryManagement\frontend
+   npm.cmd run dev
+
+DATABASE SAFETY
+- DBConnection applies additive ALTER TABLE migrations for new member fields during startup. Existing records are preserved; legacy member profile fields start blank until edited.
+- Do not overwrite library.db with anything in this patch (the archive does not contain a database file).
+- Only already-issued/returned historical fines remain as originally stored. The new rates apply to new return calculations.
